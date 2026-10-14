@@ -1,11 +1,17 @@
 {
-  "name": "orchestrator",
+  "name": "suturely",
   "version": "0.1.0",
+  "description": "Upgrades npm dependencies and fixes what breaks",
   "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/fedasiaz/suturely.git"
+  },
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js"
- },
+  },
   "dependencies": {
     "chalk": "^5.4.1",
     "dotenv": "^16.4.7",
