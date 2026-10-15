@@ -8,7 +8,6 @@ export async function applyUpgrade(dir: string, pm: PM, pkg: OutdatedPkg) {
   const pkgPath = join(dir, 'package.json');
   const json = JSON.parse(await readFile(pkgPath, 'utf8'));
 
-  // Ищем пакет в обеих секциях — не доверяем тому, что сказал npm outdated
   let section: 'dependencies' | 'devDependencies' | null = null;
   if (json.dependencies?.[pkg.name]) section = 'dependencies';
   else if (json.devDependencies?.[pkg.name]) section = 'devDependencies';

@@ -7,7 +7,12 @@ import type { OutdatedPkg } from './outdated.js';
 const TEST_TIMEOUT_MS = 5 * 60 * 1000;
 const SMOKE_TIMEOUT_MS = 15 * 1000;
 
+// Linters that we can optionally strip out of `npm test` when --skip-lint is set.
 const LINT_CMD_RE = /^(xo|eslint|standard|prettier|biome|rome)\b/;
+
+// System binaries must be called directly.
+// Running them through npx makes npm download a *different* package with the same
+// name from the registry (e.g. `npx node` pulls `node@26` from npm, not the local runtime).
 const SYSTEM_BINS = new Set(['node', 'npm', 'npx', 'python', 'python3', 'go', 'cargo', 'ruby', 'java', 'tsc', 'tsx']);
 
 export type TestResult = {
@@ -55,6 +60,7 @@ async function runCommand(
     all: true,
     timeout,
     stdin: 'ignore',
+    // CI=true and NO_COLOR prevent interactive prompts and terminal flicker
     env: { ...process.env, CI: 'true', NO_COLOR: '1', FORCE_COLOR: '0' },
   });
   const combined = (r as any).all ?? r.stdout ?? '';
@@ -131,7 +137,7 @@ export async function runTests(
     return { ok: true, verified: true, cmd: 'all scripts passed', exitCode: 0, stdout: '', stderr: '' };
   }
 
-  // fallback: нет тестовых скриптов
+  // Fallback: no test scripts. Try a lightweight verification instead of pretending success.
   const notes: string[] = [];
   notes.push('no test scripts found');
 
@@ -150,6 +156,7 @@ export async function runTests(
     };
   }
 
+  // Even without tests, `npm start` can catch gross runtime errors.
   if (!opts.skipSmoke) {
     console.log('   Running smoke test (npm start)...');
     const smoke = await smokeTest(dir, pm);

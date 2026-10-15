@@ -45,8 +45,6 @@ export async function createPR(opts: {
 
   console.log(`   Pushing branch ${branch}...`);
 
-  // Вызываем git с аргументами, но БЕЗ вывода команды в лог при ошибке.
-  // Плюс явно маскируем токен, если он всё же где-то появится.
   const r = await execa('git', ['push', pushUrl, `${branch}:${branch}`], {
     cwd: dir,
     reject: false,

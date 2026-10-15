@@ -51,7 +51,6 @@ export function printReport(report: any) {
   }
 
   if (report.packages && report.packages.length > 0) {
-    // multi-package mode
     console.log('\n' + '-'.repeat(60));
     report.packages.forEach((p: any, i: number) => printOnePackage(p, i));
 
@@ -73,7 +72,6 @@ export function printReport(report: any) {
     return;
   }
 
-  // single-package mode (старое поведение)
   if (report.target) {
     console.log(`Upgraded:  ${report.target.name} ${report.target.current} → ${report.target.latest}`);
   }

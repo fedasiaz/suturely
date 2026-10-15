@@ -22,7 +22,7 @@ export type CloneResult = {
 };
 
 export async function cloneRepo(source: string): Promise<CloneResult> {
-  const base = await mkdtemp(join(tmpdir(), 'orch-'));
+  const base = await mkdtemp(join(tmpdir(), 'suturely-'));
   const dir = join(base, 'repo');
   const git = simpleGit();
 
@@ -33,6 +33,7 @@ export async function cloneRepo(source: string): Promise<CloneResult> {
   if (await isDirectory(source)) {
     isLocal = true;
     localPath = resolve(source);
+    // Local repos are cloned via file:// to keep git semantics consistent
     const normalized = localPath.replace(/\\/g, '/');
     cloneUrl = `file://${normalized}`;
     console.log(`   Local path detected: ${localPath}`);
@@ -40,8 +41,9 @@ export async function cloneRepo(source: string): Promise<CloneResult> {
 
   await git.clone(cloneUrl, dir, ['--depth', '1']);
   const repoGit = simpleGit(dir);
-  await repoGit.addConfig('user.email', 'orch@local');
-  await repoGit.addConfig('user.name', 'orchestrator');
+  // Identity is required for git commits inside the temp clone
+  await repoGit.addConfig('user.email', 'suturely@local');
+  await repoGit.addConfig('user.name', 'suturely');
 
   const { stdout: branchOut } = await execa('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: dir });
   const defaultBranch = branchOut.trim() || 'main';

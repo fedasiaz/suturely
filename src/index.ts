@@ -57,10 +57,10 @@ async function pushAndCreatePR(
   verified: boolean,
 ): Promise<string | undefined> {
   try {
-    await git.addConfig('user.email', 'orch@local');
-    await git.addConfig('user.name', 'orchestrator');
+    await git.addConfig('user.email', 'suturely@local');
+    await git.addConfig('user.name', 'suturely');
     await execa('git', ['add', '-A'], { cwd: dir });
-    await execa('git', ['commit', '-m', `chore: upgrade ${target.name} ${target.current} → ${target.latest}`], {
+    await execa('git', ['commit', '-m', `chore: upgrade ${target.name} ${target.current} -> ${target.latest}`], {
       cwd: dir, reject: false,
     });
   } catch (e: any) {
@@ -75,15 +75,15 @@ async function pushAndCreatePR(
     return undefined;
   }
 
-  const title = `chore(deps): upgrade ${target.name} ${target.current} → ${target.latest}`;
+  const title = `chore(deps): upgrade ${target.name} ${target.current} -> ${target.latest}`;
   const body = [
-    `Automated dependency upgrade.`,
+    `Automated dependency upgrade by [suturely](https://github.com/fedasiaz/suturely).`,
     ``,
     `**Package:** \`${target.name}\``,
     `**From:** \`${target.current}\``,
     `**To:** \`${target.latest}\``,
     ``,
-    `**Result:** ${verified ? (finalOk ? '✅ GREEN' : '❌ RED') : '⚠️ UNVERIFIED'}`,
+    `**Result:** ${verified ? (finalOk ? 'GREEN' : 'RED') : 'UNVERIFIED'}`,
   ].join('\n');
 
   try {
@@ -109,7 +109,7 @@ async function processOnePackage(
 ): Promise<any> {
   const rep: any = { target, steps: [] };
 
-  // откат к чистому main перед апгрейдом (кроме первого раза — там уже чистый)
+  // Reset to clean default branch before each package so upgrades are independent
   try {
     await git.checkout(defaultBranch);
     await git.reset(['--hard', `origin/${defaultBranch}`]);
@@ -119,14 +119,14 @@ async function processOnePackage(
   }
 
   const safeName = target.name.replace(/[^a-zA-Z0-9-]/g, '-');
-  const branch = `orch/upgrade-${safeName}-${Date.now()}`;
+  const branch = `suturely/upgrade-${safeName}-${Date.now()}`;
   rep.branch = branch;
   await git.checkoutLocalBranch(branch);
 
-  console.log(`⬆️  Upgrading ${target.name}...`);
+  console.log(`   Upgrading ${target.name}...`);
   await applyUpgrade(dir, pm, target);
 
-  console.log(`🧪 Running tests after upgrade...`);
+  console.log(`   Running tests after upgrade...`);
   const testOpts = { skipLint: args.skipLint, skipSmoke: args.skipSmoke };
   let testResult = await runTests(dir, pm, target, testOpts);
   rep.steps.push({ phase: 'after-upgrade', ...testResult });
@@ -135,7 +135,7 @@ async function processOnePackage(
   let lastOutput = testResult.stdout + testResult.stderr;
   while (!testResult.ok && testResult.verified && attempt < 3) {
     attempt++;
-    console.log(`🔧 Fix attempt ${attempt}/3...`);
+    console.log(`   Fix attempt ${attempt}/3...`);
     let fix: { applied: boolean; summary?: string };
     try {
       fix = await tryFix(dir, target, testResult);
@@ -149,9 +149,10 @@ async function processOnePackage(
     console.log('   Applied fix:', fix.summary);
     testResult = await runTests(dir, pm, target, testOpts);
     rep.steps.push({ phase: `fix-${attempt}`, ...testResult });
+    // Stop early if the output didn't change — otherwise we waste LLM calls
     const nowOutput = testResult.stdout + testResult.stderr;
     if (nowOutput === lastOutput && !testResult.ok) {
-      console.log('   Output unchanged — stopping.');
+      console.log('   Output unchanged - stopping.');
       break;
     }
     lastOutput = nowOutput;
@@ -175,7 +176,7 @@ async function main() {
     allMajor: args.allMajor,
   };
 
-  console.log(`\n📦 Preparing source: ${args.source}`);
+  console.log(`\nPreparing source: ${args.source}`);
   const { dir, git, isLocal, defaultBranch } = await cloneRepo(args.source);
   report.dir = dir;
   report.isLocal = isLocal;
@@ -185,14 +186,14 @@ async function main() {
   report.pm = pm;
   console.log(`   Package manager: ${pm}`);
 
-  console.log(`\n📥 Installing dependencies...`);
+  console.log(`\nInstalling dependencies...`);
   const installResult = await execa(pm, ['install', '--no-audit', '--no-fund'], { cwd: dir, reject: false });
   if (installResult.exitCode !== 0) {
     console.error('   install failed with exit code', installResult.exitCode);
     console.error(installResult.stderr?.slice(0, 1000));
   }
 
-  console.log(`\n🔍 Checking outdated...`);
+  console.log(`\nChecking outdated...`);
   const outdated = await getOutdated(dir, pm);
 
   let targets: OutdatedPkg[] = [];
@@ -212,32 +213,33 @@ async function main() {
     return;
   }
 
-  // baseline один раз — на чистом main
   const testOpts = { skipLint: args.skipLint, skipSmoke: args.skipSmoke };
+
+  // Run tests on the unmodified repo first.
+  // If they already fail, the user's project was broken before we touched it —
+  // upgrading anything would produce noise, so we skip the whole run.
   if (!args.skipBaseline) {
-    console.log(`\n🧪 Baseline: running tests BEFORE upgrades...`);
+    console.log(`\nBaseline: running tests BEFORE upgrades...`);
     const baseline = await runTests(dir, pm, targets[0], testOpts);
     report.baseline = baseline;
     if (!baseline.ok && baseline.verified) {
-      console.log('   ❌ Baseline tests already FAIL. Skipping everything.');
+      console.log('   Baseline tests already FAIL. Skipping everything.');
       console.log('   (pass --skip-baseline to force)');
       report.preExistingFailure = true;
       printReport(report);
       return;
     }
-    console.log('   ✓ Baseline OK.');
+    console.log('   Baseline OK.');
   }
 
   if (!args.allMajor) {
-    // один пакет — старое поведение
     const rep = await processOnePackage(dir, pm, git, defaultBranch, targets[0], args);
     Object.assign(report, rep);
   } else {
-    // цикл по всем мажорным
     report.packages = [];
     for (const t of targets) {
       console.log(`\n${'='.repeat(50)}`);
-      console.log(`Processing: ${t.name} ${t.current} → ${t.latest}`);
+      console.log(`Processing: ${t.name} ${t.current} -> ${t.latest}`);
       console.log('='.repeat(50));
       const rep = await processOnePackage(dir, pm, git, defaultBranch, t, args);
       report.packages.push(rep);

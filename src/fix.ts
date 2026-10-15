@@ -4,6 +4,10 @@ import { join, dirname } from 'node:path';
 import type { OutdatedPkg } from './outdated.js';
 import type { TestResult } from './test.js';
 
+// IMPORTANT: never hoist this to a module-level constant.
+// ESM imports are evaluated before dotenv.config() runs in index.ts,
+// so process.env would be empty when this module is first loaded.
+// Reading env inside the function guarantees dotenv has already run.
 function getConfig() {
   return {
     baseUrl: process.env.LLM_BASE_URL || 'https://api.groq.com/openai/v1',
@@ -83,12 +87,9 @@ export async function tryFix(
     return { applied: false, summary: 'LLM_API_KEY (or GEMINI_API_KEY) is not set in .env' };
   }
 
-  // Собираем список реальных файлов в репо
-  const { stdout: lsOut } = await execa(
-    'git',
-    ['ls-files'],
-    { cwd: dir, reject: false },
-  );
+  // Collect the list of files actually tracked by git.
+  // Used to validate LLM-proposed edits — the model can hallucinate paths.
+  const { stdout: lsOut } = await execa('git', ['ls-files'], { cwd: dir, reject: false });
   const allFiles = (lsOut ?? '')
     .split('\n')
     .filter(Boolean)
@@ -97,7 +98,7 @@ export async function tryFix(
     .filter((f) => !f.includes('package-lock.json'))
     .slice(0, 60);
 
-  // Ищем файлы, которые реально ссылаются на пакет
+  // Find source files that reference the upgraded package
   let referenced: string[] = [];
   try {
     const r = await execa(
@@ -171,7 +172,8 @@ If you cannot fix it, return { "edits": [], "summary": "reason" }.`;
     return { applied: false, summary: payload.summary ?? 'no edits proposed' };
   }
 
-  // Применяем правки, но проверяем каждый путь
+  // Apply edits, but validate each path first.
+  // The model occasionally proposes paths that don't exist — skip them instead of crashing.
   const applied: string[] = [];
   const skipped: string[] = [];
 
@@ -183,7 +185,6 @@ If you cannot fix it, return { "edits": [], "summary": "reason" }.`;
     const normalized = edit.path.replace(/\\/g, '/').replace(/^\.\//, '');
     const fullPath = join(dir, normalized);
 
-    // Принимаем только файлы из allFiles ИЛИ уже существующие
     const inAllFiles = allFiles.includes(normalized);
     const exists = await fileExists(fullPath);
 
