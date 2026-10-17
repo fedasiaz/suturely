@@ -4,7 +4,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { detectPM, type PM } from './detect.ts';
+import { detectPM, type PM } from './detect.js';
 
 describe('detectPM', () => {
   let dirs: string[] = [];

@@ -2,9 +2,9 @@ name: suturely Auto-Upgrade
 
 on:
   schedule:
-    # Каждый понедельник в 00:00 UTC (03:00 по МСК)
+    # Runs every Monday at 00:00 UTC
     - cron: '0 0 * * 1'
-  # Позволяет запустить проверку вручную из вкладки Actions
+  # Allows manual trigger from the Actions tab
   workflow_dispatch:
 
 jobs:
@@ -20,7 +20,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
 
       - name: Install and build suturely
         run: |
@@ -29,7 +29,7 @@ jobs:
 
       - name: Run suturely
         run: |
-          # Передаем URL с токеном, чтобы бот мог клонировать и пушить
+          # Pass URL with token so the bot can clone and push
           REPO_URL="https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
           node dist/index.js $REPO_URL --all-major --push-pr
         env:
