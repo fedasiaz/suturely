@@ -10,7 +10,8 @@
   },
   "scripts": {
     "build": "tsc",
-    "start": "node dist/index.js"
+    "start": "node dist/index.js",
+    "test": "node --test src/**/*.test.ts"
   },
   "dependencies": {
     "chalk": "^5.4.1",
