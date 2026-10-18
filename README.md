@@ -48,6 +48,26 @@ node dist/index.js https://github.com/you/repo --package=lodash --push-pr
 | `--skip-lint` | Drop linters from test commands |
 | `--no-smoke` | Skip `npm start` smoke test |
 
+## GitHub Action Setup (Free & Autonomous)
+
+You can run Suturely automatically on GitHub's servers for free. It will check for updates every Monday and open a PR if it finds something.
+
+1. Copy the workflow file from `.github/workflows/suturely.yml` into your own repository.
+2. Go to your repository **Settings → Secrets and variables → Actions**.
+3. Add the following repository secrets based on your preferred LLM provider:
+
+### Option A: Using Gemini (Recommended, higher limits)
+- `LLM_API_KEY`: Your Google AI Studio key (starts with `AQ.` or `AIza`)
+- `LLM_BASE_URL`: `https://generativelanguage.googleapis.com/v1beta/openai/`
+- `LLM_MODEL`: `gemini-2.5-flash-lite`
+
+### Option B: Using Groq (Faster, but lower token limits)
+- `LLM_API_KEY`: Your Groq key (starts with `gsk_`)
+- `LLM_BASE_URL`: `https://api.groq.com/openai/v1`
+- `LLM_MODEL`: `openai/gpt-oss-120b`
+
+4. Go to the **Actions** tab in your repository, select `suturely Auto-Upgrade`, and click **Run workflow**.
+
 ## How it works
 
 1. Clone repo to temp dir.
