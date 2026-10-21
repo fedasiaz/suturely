@@ -7,7 +7,6 @@ import type { TestResult } from './test.js';
 // IMPORTANT: never hoist this to a module-level constant.
 // ESM imports are evaluated before dotenv.config() runs in index.ts,
 // so process.env would be empty when this module is first loaded.
-// Reading env inside the function guarantees dotenv has already run.
 function getConfig() {
   return {
     baseUrl: process.env.LLM_BASE_URL || 'https://api.groq.com/openai/v1',
@@ -88,7 +87,6 @@ export async function tryFix(
   }
 
   // Collect the list of files actually tracked by git.
-  // Used to validate LLM-proposed edits — the model can hallucinate paths.
   const { stdout: lsOut } = await execa('git', ['ls-files'], { cwd: dir, reject: false });
   const allFiles = (lsOut ?? '')
     .split('\n')
@@ -138,8 +136,10 @@ ${allFiles.join('\n')}
 CRITICAL RULES:
 1. The "path" field MUST be an exact relative path from the "ALL FILES" list above.
 2. Do NOT invent paths. Do NOT use placeholder names like "src/foo.ts" or "example.js".
-3. If the broken test is at root (e.g. "test-fetch.js"), use EXACTLY that path.
-4. Provide the FULL new content of each file you edit — not a diff, not a snippet.
+3. If the broken test is at root (e.g. "test.js"), use EXACTLY that path.
+4. DO NOT edit package.json under any circumstances. The system already handled package.json. 
+5. To fix ESM-only errors in CommonJS files, use dynamic import() inside your code. For example: const fetch = (await import('node-fetch')).default;
+6. Provide the FULL new content of each file you edit — not a diff, not a snippet.
 
 Respond ONLY with a JSON object:
 {
@@ -173,7 +173,6 @@ If you cannot fix it, return { "edits": [], "summary": "reason" }.`;
   }
 
   // Apply edits, but validate each path first.
-  // The model occasionally proposes paths that don't exist — skip them instead of crashing.
   const applied: string[] = [];
   const skipped: string[] = [];
 
@@ -184,6 +183,13 @@ If you cannot fix it, return { "edits": [], "summary": "reason" }.`;
     }
     const normalized = edit.path.replace(/\\/g, '/').replace(/^\.\//, '');
     const fullPath = join(dir, normalized);
+
+    // HARD BLOCK: Never allow LLM to modify package.json during the fix phase.
+    // It tends to overwrite the whole file and destroy the "scripts" section.
+    if (normalized === 'package.json') {
+      skipped.push('package.json (edits blocked by suturely)');
+      continue;
+    }
 
     const inAllFiles = allFiles.includes(normalized);
     const exists = await fileExists(fullPath);

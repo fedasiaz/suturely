@@ -11,6 +11,7 @@ import { runTests } from './test.js';
 import { tryFix } from './fix.js';
 import { printReport } from './report.js';
 import { createPR, parseGitHubRemote } from './pr.js';
+import { runInteractive } from './interactive.js';
 
 type Args = {
   source: string;
@@ -23,30 +24,45 @@ type Args = {
   allMajor: boolean;
 };
 
-function parseArgsOrExit(argv: string[]): Args {
-  const out: Args = {
-    source: '', pushPr: false, dryRun: false,
-    skipBaseline: false, skipLint: false, skipSmoke: false, allMajor: false,
-  };
-  for (const a of argv) {
-    if (a.startsWith('--package=')) out.filterPackage = a.slice('--package='.length);
-    else if (a === '--push-pr') out.pushPr = true;
-    else if (a === '--dry-run') out.dryRun = true;
-    else if (a === '--skip-baseline') out.skipBaseline = true;
-    else if (a === '--skip-lint') out.skipLint = true;
-    else if (a === '--no-smoke') out.skipSmoke = true;
-    else if (a === '--all-major') out.allMajor = true;
-    else if (!a.startsWith('--') && !out.source) out.source = a;
+async function getArgs(): Promise<Args> {
+  // If arguments are passed via CLI, parse them (for automation)
+  if (process.argv.length > 2) {
+    const out: Args = {
+      source: '', pushPr: false, dryRun: false,
+      skipBaseline: false, skipLint: false, skipSmoke: false, allMajor: false,
+    };
+    for (const a of process.argv.slice(2)) {
+      if (a.startsWith('--package=')) out.filterPackage = a.slice('--package='.length);
+      else if (a === '--push-pr') out.pushPr = true;
+      else if (a === '--dry-run') out.dryRun = true;
+      else if (a === '--skip-baseline') out.skipBaseline = true;
+      else if (a === '--skip-lint') out.skipLint = true;
+      else if (a === '--no-smoke') out.skipSmoke = true;
+      else if (a === '--all-major') out.allMajor = true;
+      else if (!a.startsWith('--') && !out.source) out.source = a;
+    }
+    if (!out.source) {
+      console.error('Usage: node dist/index.js <repo-url-or-local-path> [--package=name] [--all-major] [--push-pr] [--dry-run] [--skip-baseline] [--skip-lint] [--no-smoke]');
+      process.exit(1);
+    }
+    return out;
   }
-  if (!out.source) {
-    console.error('Usage: node dist/index.js <repo-url-or-local-path> [--package=name] [--all-major] [--push-pr] [--dry-run] [--skip-baseline] [--skip-lint] [--no-smoke]');
-    process.exit(1);
-    throw new Error('unreachable');
-  }
-  return out;
-}
 
-const args: Args = parseArgsOrExit(process.argv.slice(2));
+  // If no arguments are passed, start interactive mode
+  console.log('\nWelcome to suturely! Let\'s configure your run.\n');
+  const interactive = await runInteractive();
+  
+  return {
+    source: interactive.source,
+    filterPackage: interactive.filterPackage,
+    pushPr: interactive.pushPr,
+    dryRun: !interactive.pushPr, // If not pushing PR, it's a dry run by default
+    skipBaseline: false,
+    skipLint: interactive.skipLint,
+    skipSmoke: false,
+    allMajor: false,
+  };
+}
 
 async function pushAndCreatePR(
   dir: string,
@@ -149,7 +165,7 @@ async function processOnePackage(
     console.log('   Applied fix:', fix.summary);
     testResult = await runTests(dir, pm, target, testOpts);
     rep.steps.push({ phase: `fix-${attempt}`, ...testResult });
-    // Stop early if the output didn't change — otherwise we waste LLM calls
+    // Stop early if the output didn't change to avoid wasting LLM calls
     const nowOutput = testResult.stdout + testResult.stderr;
     if (nowOutput === lastOutput && !testResult.ok) {
       console.log('   Output unchanged - stopping.');
@@ -170,6 +186,8 @@ async function processOnePackage(
 }
 
 async function main() {
+  const args = await getArgs();
+
   const report: any = {
     repo: args.source,
     skipLint: args.skipLint,
@@ -216,8 +234,7 @@ async function main() {
   const testOpts = { skipLint: args.skipLint, skipSmoke: args.skipSmoke };
 
   // Run tests on the unmodified repo first.
-  // If they already fail, the user's project was broken before we touched it —
-  // upgrading anything would produce noise, so we skip the whole run.
+  // If they already fail, skip everything to avoid noise.
   if (!args.skipBaseline) {
     console.log(`\nBaseline: running tests BEFORE upgrades...`);
     const baseline = await runTests(dir, pm, targets[0], testOpts);
