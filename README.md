@@ -4,6 +4,8 @@
 
 > Bot that upgrades npm dependencies and fixes what breaks.
 
+![suturely demo](assets/demo.gif)
+
 `suturely` takes the pain out of dependency upgrades. It runs your tests before and after, and if something breaks — an LLM reads the error and patches the code. Only opens a PR when tests are green.
 
 ## Why
