@@ -12,6 +12,7 @@ import { tryFix } from './fix.js';
 import { printReport } from './report.js';
 import { createPR, parseGitHubRemote } from './pr.js';
 import { runInteractive } from './interactive.js';
+import { loadConfig } from './config.js';
 
 type Args = {
   source: string;
@@ -48,7 +49,7 @@ async function getArgs(): Promise<Args> {
     return out;
   }
 
-  // If no arguments are passed, start interactive mode
+  // If no arguments, use interactive mode
   console.log('\nWelcome to suturely! Let\'s configure your run.\n');
   const interactive = await runInteractive();
   
@@ -56,7 +57,7 @@ async function getArgs(): Promise<Args> {
     source: interactive.source,
     filterPackage: interactive.filterPackage,
     pushPr: interactive.pushPr,
-    dryRun: !interactive.pushPr, // If not pushing PR, it's a dry run by default
+    dryRun: !interactive.pushPr,
     skipBaseline: false,
     skipLint: interactive.skipLint,
     skipSmoke: false,
@@ -125,7 +126,7 @@ async function processOnePackage(
 ): Promise<any> {
   const rep: any = { target, steps: [] };
 
-  // Reset to clean default branch before each package so upgrades are independent
+  // Reset to clean default branch before each package
   try {
     await git.checkout(defaultBranch);
     await git.reset(['--hard', `origin/${defaultBranch}`]);
@@ -165,7 +166,6 @@ async function processOnePackage(
     console.log('   Applied fix:', fix.summary);
     testResult = await runTests(dir, pm, target, testOpts);
     rep.steps.push({ phase: `fix-${attempt}`, ...testResult });
-    // Stop early if the output didn't change to avoid wasting LLM calls
     const nowOutput = testResult.stdout + testResult.stderr;
     if (nowOutput === lastOutput && !testResult.ok) {
       console.log('   Output unchanged - stopping.');
@@ -186,6 +186,12 @@ async function processOnePackage(
 }
 
 async function main() {
+  // Load config and apply saved API keys if they exist
+  const config = await loadConfig();
+  if (config.apiKey && !process.env.LLM_API_KEY) process.env.LLM_API_KEY = config.apiKey;
+  if (config.baseUrl && !process.env.LLM_BASE_URL) process.env.LLM_BASE_URL = config.baseUrl;
+  if (config.model && !process.env.LLM_MODEL) process.env.LLM_MODEL = config.model;
+
   const args = await getArgs();
 
   const report: any = {
@@ -233,8 +239,6 @@ async function main() {
 
   const testOpts = { skipLint: args.skipLint, skipSmoke: args.skipSmoke };
 
-  // Run tests on the unmodified repo first.
-  // If they already fail, skip everything to avoid noise.
   if (!args.skipBaseline) {
     console.log(`\nBaseline: running tests BEFORE upgrades...`);
     const baseline = await runTests(dir, pm, targets[0], testOpts);
