@@ -12,6 +12,8 @@ import { applyUpgrade } from './upgrade.js';
 import { runTests } from './test.js';
 import { tryFix, generateTest } from './fix.js';
 import { printReport } from './report.js';
+import { generateHtmlReport } from './report-html.js'; // NEW
+import { generateReleaseNotes } from './release-notes.js'; // NEW
 import { createPR, parseGitHubRemote } from './pr.js';
 import { runInteractive } from './interactive.js';
 import { loadConfig } from './config.js';
@@ -55,7 +57,8 @@ async function pushAndCreatePR(dir: string, git: SimpleGit, branch: string, targ
   if (!parsed) return undefined;
 
   const title = `chore(deps): upgrade ${target.name} ${target.current} -> ${target.latest}`;
-  const body = `Automated dependency upgrade by suturely.\n\n**Result:** ${verified ? (finalOk ? 'GREEN' : 'RED') : 'UNVERIFIED'}`;
+  console.log(`   Generating Release Notes via AI...`);
+  const body = await generateReleaseNotes(dir, target, finalOk, verified);
 
   try {
     const pr = await createPR({ dir, branch, owner: parsed.owner, repo: parsed.repo, title, body, token: process.env.GITHUB_TOKEN! });
@@ -152,7 +155,6 @@ async function main() {
 
   if (targets.length === 0) { console.log('   Nothing to upgrade. Done.'); return; }
 
-  // === NEW: GENERATE TEST IF MISSING (AFTER FINDING TARGET) ===
   const pkgJson = JSON.parse(await (await import('node:fs/promises')).readFile(join(targetDir, 'package.json'), 'utf8'));
   if (!pkgJson.scripts?.test && !existsSync(join(targetDir, 'generated.test.js'))) {
     console.log(`\n🧪 No tests found. Asking AI to generate a smoke test for ${targets[0].name}...`);
@@ -187,7 +189,12 @@ async function main() {
   }
 
   if (args.dryRun) console.log('\n[dry-run] skipping commit and PR creation.');
+
   printReport(report);
+
+  // Generate HTML Report
+  const htmlPath = await generateHtmlReport(process.cwd(), report);
+  console.log(`\n📊 HTML report generated at: ${htmlPath}`);
 }
 
 main().catch((e) => { console.error('Fatal:', e); process.exit(1); });
