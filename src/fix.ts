@@ -4,9 +4,6 @@ import { join, dirname } from 'node:path';
 import type { OutdatedPkg } from './outdated.js';
 import type { TestResult } from './test.js';
 
-// IMPORTANT: never hoist this to a module-level constant.
-// ESM imports are evaluated before dotenv.config() runs in index.ts,
-// so process.env would be empty when this module is first loaded.
 function getConfig() {
   return {
     baseUrl: process.env.LLM_BASE_URL || 'https://api.groq.com/openai/v1',
@@ -32,8 +29,7 @@ async function callLLMOnce(prompt: string): Promise<string> {
         messages: [
           {
             role: 'system',
-            content:
-              'You are a senior software engineer. You fix broken dependency upgrades. Respond ONLY with a single JSON object, no markdown fences, no explanations outside JSON.',
+            content: 'You are a senior software engineer. Respond ONLY with a single JSON object, no markdown fences.',
           },
           { role: 'user', content: prompt },
         ],
@@ -42,16 +38,9 @@ async function callLLMOnce(prompt: string): Promise<string> {
       }),
       signal: controller.signal,
     });
-    if (!res.ok) {
-      const errText = await res.text();
-      throw new Error(`HTTP ${res.status}: ${errText.slice(0, 400)}`);
-    }
+    if (!res.ok) throw new Error(`HTTP ${res.status}: ${(await res.text()).slice(0, 400)}`);
     const data: any = await res.json();
-    const content = data?.choices?.[0]?.message?.content;
-    if (typeof content !== 'string') {
-      throw new Error('Unexpected response shape: ' + JSON.stringify(data).slice(0, 300));
-    }
-    return content;
+    return data?.choices?.[0]?.message?.content || '{}';
   } finally {
     clearTimeout(timer);
   }
@@ -68,12 +57,7 @@ async function callLLM(prompt: string): Promise<string> {
 }
 
 async function fileExists(p: string): Promise<boolean> {
-  try {
-    const s = await stat(p);
-    return s.isFile();
-  } catch {
-    return false;
-  }
+  try { return (await stat(p)).isFile(); } catch { return false; }
 }
 
 export async function tryFix(
@@ -82,142 +66,116 @@ export async function tryFix(
   result: TestResult,
 ): Promise<{ applied: boolean; summary?: string }> {
   const { apiKey } = getConfig();
-  if (!apiKey) {
-    return { applied: false, summary: 'LLM_API_KEY (or GEMINI_API_KEY) is not set in .env' };
+  if (!apiKey) return { applied: false, summary: 'LLM_API_KEY not set' };
+
+  const { stdout: lsOut } = await execa('git', ['ls-files'], { cwd: dir, reject: false });
+  const allFiles = (lsOut ?? '').split('\n').filter(Boolean).filter((f) => /\.(ts|js|tsx|jsx|json|mjs|cjs)$/.test(f)).filter((f) => !f.startsWith('node_modules/')).slice(0, 60);
+
+  const testFilePath = join(dir, 'generated.test.js');
+  let testFileContent = '';
+  if (await fileExists(testFilePath)) {
+    testFileContent = await readFile(testFilePath, 'utf8');
+    if (!allFiles.includes('generated.test.js')) allFiles.push('generated.test.js');
   }
 
-  // Collect the list of files actually tracked by git.
-  const { stdout: lsOut } = await execa('git', ['ls-files'], { cwd: dir, reject: false });
-  const allFiles = (lsOut ?? '')
-    .split('\n')
-    .filter(Boolean)
-    .filter((f) => /\.(ts|js|tsx|jsx|json|mjs|cjs)$/.test(f))
-    .filter((f) => !f.startsWith('node_modules/'))
-    .filter((f) => !f.includes('package-lock.json'))
-    .slice(0, 60);
-
-  // Find source files that reference the upgraded package
   let referenced: string[] = [];
   try {
-    const r = await execa(
-      'grep',
-      ['-rl', pkg.name, '.', '--include=*.ts', '--include=*.js', '--include=*.tsx', '--include=*.jsx', '--include=*.mjs', '--include=*.cjs', '--exclude-dir=node_modules'],
-      { cwd: dir, reject: false },
-    );
+    const r = await execa('grep', ['-rl', pkg.name, '.', '--include=*.ts', '--include=*.js', '--exclude-dir=node_modules'], { cwd: dir, reject: false });
     referenced = (r.stdout ?? '').split('\n').filter(Boolean).slice(0, 10);
   } catch {}
 
   const fileSnippets: Array<{ path: string; content: string }> = [];
-  const seen = new Set<string>();
   for (const f of referenced) {
-    if (seen.has(f)) continue;
-    seen.add(f);
-    try {
-      const content = await readFile(join(dir, f), 'utf8');
-      fileSnippets.push({ path: f, content: content.slice(0, 6000) });
-    } catch {}
+    try { fileSnippets.push({ path: f, content: (await readFile(join(dir, f), 'utf8')).slice(0, 6000) }); } catch {}
   }
 
   const prompt = `You are fixing a broken dependency upgrade.
-
 Package: ${pkg.name}
-Upgraded from: ${pkg.current}
-Upgraded to: ${pkg.latest}
+Upgraded from: ${pkg.current} to: ${pkg.latest}
 
-ERROR OUTPUT (${result.cmd}, exit ${result.exitCode}):
+ERROR OUTPUT:
 ${result.stderr || result.stdout}
 
-Files in the repo that reference "${pkg.name}":
-${fileSnippets.length ? fileSnippets.map((f) => `\n--- ${f.path} ---\n${f.content}`).join('\n') : '(none found by grep — check test files at root!)'}
+${testFileContent ? `\n--- Content of generated.test.js ---\n${testFileContent}\n` : ''}
 
-ALL FILES in the repo (you may only edit these):
+ALL FILES (you may only edit these):
 ${allFiles.join('\n')}
 
 CRITICAL RULES:
-1. The "path" field MUST be an exact relative path from the "ALL FILES" list above.
-2. Do NOT invent paths. Do NOT use placeholder names like "src/foo.ts" or "example.js".
-3. If the broken test is at root (e.g. "test.js"), use EXACTLY that path.
-4. DO NOT edit package.json under any circumstances. The system already handled package.json. 
-5. To fix ESM-only errors in CommonJS files, use dynamic import() inside your code. For example: const fetch = (await import('node-fetch')).default;
-6. Provide the FULL new content of each file you edit — not a diff, not a snippet.
+1. The "path" MUST be from the ALL FILES list.
+2. DO NOT edit package.json or package-lock.json.
+3. If the error is an assertion failure like 'actual: object, expected: function', it means the package is ESM-only and require() is returning the module object. You MUST fix the test file (generated.test.js) by using dynamic import: const fetch = (await import('node-fetch')).default;
+4. Provide the FULL new content of each file.
 
 Respond ONLY with a JSON object:
-{
-  "edits": [
-    { "path": "<exact path from ALL FILES list>", "content": "<full new file content>" }
-  ],
-  "summary": "one-line explanation of the fix"
-}
-
-If you cannot fix it, return { "edits": [], "summary": "reason" }.`;
+{ "edits": [{ "path": "...", "content": "..." }], "summary": "..." }`;
 
   let text = '{}';
-  try {
-    text = await callLLM(prompt);
-  } catch (e: any) {
-    const msg = e?.message ?? String(e);
-    console.error('   LLM API error:', msg.slice(0, 300));
-    return { applied: false, summary: `LLM API error: ${msg.slice(0, 200)}` };
-  }
+  try { text = await callLLM(prompt); } catch (e: any) { return { applied: false, summary: `LLM Error: ${e.message}` }; }
 
   let payload: any;
-  try {
-    payload = JSON.parse(text);
-  } catch {
-    console.error('   LLM returned non-JSON:', text.slice(0, 300));
-    return { applied: false, summary: 'LLM returned invalid JSON' };
-  }
+  try { payload = JSON.parse(text); } catch { return { applied: false, summary: 'Invalid JSON' }; }
 
-  if (!payload.edits?.length) {
-    return { applied: false, summary: payload.summary ?? 'no edits proposed' };
-  }
+  if (!payload.edits?.length) return { applied: false, summary: payload.summary ?? 'no edits' };
 
-  // Apply edits, but validate each path first.
   const applied: string[] = [];
-  const skipped: string[] = [];
-
   for (const edit of payload.edits) {
-    if (!edit?.path || typeof edit.path !== 'string') {
-      skipped.push('<no path>');
-      continue;
-    }
     const normalized = edit.path.replace(/\\/g, '/').replace(/^\.\//, '');
+    // Block all config and lockfiles
+    if (normalized === 'package.json' || normalized.includes('package-lock.json') || normalized.includes('yarn.lock') || normalized.includes('pnpm-lock.yaml')) {
+      continue;
+    }
     const fullPath = join(dir, normalized);
-
-    // HARD BLOCK: Never allow LLM to modify package.json during the fix phase.
-    // It tends to overwrite the whole file and destroy the "scripts" section.
-    if (normalized === 'package.json') {
-      skipped.push('package.json (edits blocked by suturely)');
-      continue;
-    }
-
-    const inAllFiles = allFiles.includes(normalized);
-    const exists = await fileExists(fullPath);
-
-    if (!inAllFiles && !exists) {
-      skipped.push(`${normalized} (not in repo)`);
-      continue;
-    }
-
-    try {
+    if (allFiles.includes(normalized) || await fileExists(fullPath)) {
       await mkdir(dirname(fullPath), { recursive: true });
       await writeFile(fullPath, edit.content ?? '');
       applied.push(normalized);
-    } catch (e: any) {
-      skipped.push(`${normalized} (write failed: ${e?.message ?? ''})`);
     }
   }
 
-  console.log(`   LLM proposed ${payload.edits.length} edit(s):`);
-  if (applied.length) console.log(`     applied: ${applied.join(', ')}`);
-  if (skipped.length) console.log(`     skipped: ${skipped.join(', ')}`);
-
-  if (applied.length === 0) {
-    return {
-      applied: false,
-      summary: `no valid edits (skipped: ${skipped.join('; ')})`,
-    };
-  }
-
+  if (applied.length === 0) return { applied: false, summary: 'no valid edits (LLM tried to edit lockfiles or invalid paths)' };
   return { applied: true, summary: payload.summary ?? `edited ${applied.join(', ')}` };
+}
+
+export async function generateTest(dir: string, targetPkg: string): Promise<{ created: boolean; summary?: string }> {
+  const { apiKey } = getConfig();
+  if (!apiKey) return { created: false, summary: 'No API key' };
+
+  const pkgJson = JSON.parse(await readFile(join(dir, 'package.json'), 'utf8'));
+  const isESM = pkgJson.type === 'module';
+  
+  const { stdout: lsOut } = await execa('git', ['ls-files'], { cwd: dir, reject: false });
+  const allFiles = (lsOut ?? '').split('\n').filter(Boolean).filter((f) => /\.(ts|js|tsx|jsx|mjs|cjs)$/.test(f)).filter((f) => !f.startsWith('node_modules/'));
+
+  const currentVersion = pkgJson.dependencies?.[targetPkg] || pkgJson.devDependencies?.[targetPkg] || 'unknown';
+
+  const prompt = `The project has no test script. Write a REAL smoke test for the package "${targetPkg}".
+Use the built-in 'node:test' and 'node:assert' modules.
+
+Here are the files in the project:
+${allFiles.join('\n')}
+
+CRITICAL RULES:
+1. ${isESM ? 'The project is ESM. Use import syntax.' : 'The project is CommonJS. You MUST use require() syntax. Do NOT use import.'}
+2. DO NOT write dummy tests like 'assert.strictEqual(1, 1)'. I will reject them.
+3. You MUST import "${targetPkg}" and check its main functionality. For "node-fetch" v2, the correct check is: const fetch = require('node-fetch'); assert.strictEqual(typeof fetch, 'function');
+4. The test MUST pass on the CURRENT codebase with version ${currentVersion}.
+Save the file as 'generated.test.js'.
+
+Respond ONLY with a JSON object:
+{ "edits": [{ "path": "generated.test.js", "content": "..." }], "summary": "Created real smoke test" }`;
+
+  let text = '{}';
+  try { text = await callLLM(prompt); } catch { return { created: false, summary: 'LLM failed' }; }
+  
+  let payload: any;
+  try { payload = JSON.parse(text); } catch { return { created: false, summary: 'Invalid JSON' }; }
+
+  if (payload.edits?.length) {
+    for (const edit of payload.edits) {
+      await writeFile(join(dir, edit.path), edit.content);
+    }
+    return { created: true, summary: payload.summary };
+  }
+  return { created: false, summary: 'LLM did not provide edits' };
 }

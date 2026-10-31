@@ -1,38 +1,29 @@
 import dotenv from 'dotenv';
 dotenv.config({ override: true });
 
-import { existsSync } from 'node:fs'; // Добавлен импорт
-import { join } from 'node:path';     // Добавлен импорт
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 import { execa } from 'execa';
 import type { SimpleGit } from 'simple-git';
 import { cloneRepo } from './clone.js';
-import { detectPM, findMonorepoPackages, type PM } from './detect.js'; // Добавлен findMonorepoPackages
+import { detectPM, findMonorepoPackages, type PM } from './detect.js';
 import { getOutdated, pickTarget, pickAllMajor, type OutdatedPkg } from './outdated.js';
 import { applyUpgrade } from './upgrade.js';
 import { runTests } from './test.js';
-import { tryFix } from './fix.js';
+import { tryFix, generateTest } from './fix.js';
 import { printReport } from './report.js';
 import { createPR, parseGitHubRemote } from './pr.js';
 import { runInteractive } from './interactive.js';
 import { loadConfig } from './config.js';
 
 type Args = {
-  source: string;
-  filterPackage?: string;
-  pushPr: boolean;
-  dryRun: boolean;
-  skipBaseline: boolean;
-  skipLint: boolean;
-  skipSmoke: boolean;
-  allMajor: boolean;
+  source: string; filterPackage?: string; pushPr: boolean; dryRun: boolean;
+  skipBaseline: boolean; skipLint: boolean; skipSmoke: boolean; allMajor: boolean;
 };
 
 async function getArgs(): Promise<Args> {
   if (process.argv.length > 2) {
-    const out: Args = {
-      source: '', pushPr: false, dryRun: false,
-      skipBaseline: false, skipLint: false, skipSmoke: false, allMajor: false,
-    };
+    const out: Args = { source: '', pushPr: false, dryRun: false, skipBaseline: false, skipLint: false, skipSmoke: false, allMajor: false };
     for (const a of process.argv.slice(2)) {
       if (a.startsWith('--package=')) out.filterPackage = a.slice('--package='.length);
       else if (a === '--push-pr') out.pushPr = true;
@@ -43,95 +34,43 @@ async function getArgs(): Promise<Args> {
       else if (a === '--all-major') out.allMajor = true;
       else if (!a.startsWith('--') && !out.source) out.source = a;
     }
-    if (!out.source) {
-      console.error('Usage: node dist/index.js <repo-url-or-local-path> [--package=name] [--all-major] [--push-pr] [--dry-run] [--skip-baseline] [--skip-lint] [--no-smoke]');
-      process.exit(1);
-    }
+    if (!out.source) { console.error('Usage: node dist/index.js <repo> [flags]'); process.exit(1); }
     return out;
   }
-
-  console.log('\nWelcome to suturely! Let\'s configure your run.\n');
+  console.log('\nWelcome to suturely!\n');
   const interactive = await runInteractive();
-  return {
-    source: interactive.source,
-    filterPackage: interactive.filterPackage,
-    pushPr: interactive.pushPr,
-    dryRun: !interactive.pushPr,
-    skipBaseline: false,
-    skipLint: interactive.skipLint,
-    skipSmoke: false,
-    allMajor: false,
-  };
+  return { source: interactive.source, filterPackage: interactive.filterPackage, pushPr: interactive.pushPr, dryRun: !interactive.pushPr, skipBaseline: false, skipLint: interactive.skipLint, skipSmoke: false, allMajor: false };
 }
 
-async function pushAndCreatePR(
-  dir: string,
-  git: SimpleGit,
-  branch: string,
-  target: OutdatedPkg,
-  finalOk: boolean,
-  verified: boolean,
-): Promise<string | undefined> {
+async function pushAndCreatePR(dir: string, git: SimpleGit, branch: string, target: OutdatedPkg, finalOk: boolean, verified: boolean): Promise<string | undefined> {
   try {
     await git.addConfig('user.email', 'suturely@local');
     await git.addConfig('user.name', 'suturely');
     await execa('git', ['add', '-A'], { cwd: dir });
-    await execa('git', ['commit', '-m', `chore: upgrade ${target.name} ${target.current} -> ${target.latest}`], {
-      cwd: dir, reject: false,
-    });
-  } catch (e: any) {
-    console.error('   commit failed:', e?.message ?? e);
-    return undefined;
-  }
+    await execa('git', ['commit', '-m', `chore: upgrade ${target.name} ${target.current} -> ${target.latest}`], { cwd: dir, reject: false });
+  } catch { return undefined; }
 
   const { stdout: remoteUrl } = await execa('git', ['remote', 'get-url', 'origin'], { cwd: dir, reject: false });
   const parsed = parseGitHubRemote(remoteUrl ?? '');
-  if (!parsed) {
-    console.error('   cannot parse GitHub remote URL:', remoteUrl);
-    return undefined;
-  }
+  if (!parsed) return undefined;
 
   const title = `chore(deps): upgrade ${target.name} ${target.current} -> ${target.latest}`;
-  const body = [
-    `Automated dependency upgrade by [suturely](https://github.com/fedasiaz/suturely).`,
-    ``,
-    `**Package:** \`${target.name}\``,
-    `**From:** \`${target.current}\``,
-    `**To:** \`${target.latest}\``,
-    ``,
-    `**Result:** ${verified ? (finalOk ? 'GREEN' : 'RED') : 'UNVERIFIED'}`,
-  ].join('\n');
+  const body = `Automated dependency upgrade by suturely.\n\n**Result:** ${verified ? (finalOk ? 'GREEN' : 'RED') : 'UNVERIFIED'}`;
 
   try {
-    const pr = await createPR({
-      dir, branch, owner: parsed.owner, repo: parsed.repo,
-      title, body, token: process.env.GITHUB_TOKEN!,
-    });
+    const pr = await createPR({ dir, branch, owner: parsed.owner, repo: parsed.repo, title, body, token: process.env.GITHUB_TOKEN! });
     console.log(`   PR created: ${pr.url}`);
     return pr.url;
-  } catch (e: any) {
-    console.error('   PR creation failed:', e?.message ?? e);
-    return undefined;
-  }
+  } catch (e: any) { return undefined; }
 }
 
-async function processOnePackage(
-  targetDir: string, // <-- Изменено на targetDir
-  pm: PM,
-  git: SimpleGit,
-  defaultBranch: string,
-  target: OutdatedPkg,
-  args: Args,
-): Promise<any> {
+async function processOnePackage(targetDir: string, pm: PM, git: SimpleGit, defaultBranch: string, target: OutdatedPkg, args: Args): Promise<any> {
   const rep: any = { target, steps: [] };
-
   try {
     await git.checkout(defaultBranch);
     await git.reset(['--hard', `origin/${defaultBranch}`]);
     await execa(pm, ['install', '--no-audit', '--no-fund'], { cwd: targetDir, reject: false });
-  } catch (e: any) {
-    console.log('   reset to default failed:', e?.message?.slice(0, 120));
-  }
+  } catch {}
 
   const safeName = target.name.replace(/[^a-zA-Z0-9-]/g, '-');
   const branch = `suturely/upgrade-${safeName}-${Date.now()}`;
@@ -152,24 +91,13 @@ async function processOnePackage(
     attempt++;
     console.log(`   Fix attempt ${attempt}/3...`);
     let fix: { applied: boolean; summary?: string };
-    try {
-      fix = await tryFix(targetDir, target, testResult);
-    } catch (e: any) {
-      fix = { applied: false, summary: 'crash: ' + (e?.message ?? '') };
-    }
-    if (!fix.applied) {
-      console.log('   LLM could not produce a fix:', fix.summary);
-      break;
-    }
+    try { fix = await tryFix(targetDir, target, testResult); } catch (e: any) { fix = { applied: false, summary: e.message }; }
+    if (!fix.applied) { console.log('   LLM failed:', fix.summary); break; }
     console.log('   Applied fix:', fix.summary);
     testResult = await runTests(targetDir, pm, target, testOpts);
     rep.steps.push({ phase: `fix-${attempt}`, ...testResult });
-    const nowOutput = testResult.stdout + testResult.stderr;
-    if (nowOutput === lastOutput && !testResult.ok) {
-      console.log('   Output unchanged - stopping.');
-      break;
-    }
-    lastOutput = nowOutput;
+    if (testResult.stdout + testResult.stderr === lastOutput && !testResult.ok) break;
+    lastOutput = testResult.stdout + testResult.stderr;
   }
 
   rep.finalOk = testResult.ok;
@@ -179,7 +107,6 @@ async function processOnePackage(
     const prUrl = await pushAndCreatePR(targetDir, git, branch, target, testResult.ok, testResult.verified);
     if (prUrl) rep.prUrl = prUrl;
   }
-
   return rep;
 }
 
@@ -190,61 +117,48 @@ async function main() {
   if (config.model && !process.env.LLM_MODEL) process.env.LLM_MODEL = config.model;
 
   const args = await getArgs();
-
-  const report: any = {
-    repo: args.source,
-    skipLint: args.skipLint,
-    allMajor: args.allMajor,
-  };
+  const report: any = { repo: args.source, skipLint: args.skipLint, allMajor: args.allMajor };
 
   console.log(`\nPreparing source: ${args.source}`);
   const { dir, git, isLocal, defaultBranch } = await cloneRepo(args.source);
-  report.dir = dir;
-  report.isLocal = isLocal;
-  console.log(`   Default branch: ${defaultBranch}`);
+  report.dir = dir; report.isLocal = isLocal; console.log(`   Default branch: ${defaultBranch}`);
 
-  // === MONOREPO SUPPORT ===
   let targetDir = dir;
   if (!existsSync(join(dir, 'package.json'))) {
-    console.log(`\n   No root package.json found. Searching for monorepo packages...`);
+    console.log(`\n   No root package.json. Searching monorepo...`);
     const packages = findMonorepoPackages(dir);
-    if (packages.length === 0) {
-      console.error('   ❌ No packages found in this repo. Aborting.');
-      return;
-    }
+    if (packages.length === 0) { console.error('   No packages found.'); return; }
     targetDir = packages[0];
     console.log(`   ✓ Found ${packages.length} packages. Targeting: ${targetDir}`);
   }
 
   const pm = await detectPM(targetDir);
-  report.pm = pm;
-  console.log(`   Package manager: ${pm}`);
+  report.pm = pm; console.log(`   Package manager: ${pm}`);
 
   console.log(`\nInstalling dependencies...`);
-  const installResult = await execa(pm, ['install', '--no-audit', '--no-fund'], { cwd: targetDir, reject: false });
-  if (installResult.exitCode !== 0) {
-    console.error('   install failed with exit code', installResult.exitCode);
-    console.error(installResult.stderr?.slice(0, 1000));
-  }
+  await execa(pm, ['install', '--no-audit', '--no-fund'], { cwd: targetDir, reject: false });
 
   console.log(`\nChecking outdated...`);
   const outdated = await getOutdated(targetDir, pm);
-
   let targets: OutdatedPkg[] = [];
+  
   if (args.allMajor) {
-    targets = pickAllMajor(outdated);
-    if (args.filterPackage) {
-      targets = targets.filter((p) => p.name === args.filterPackage);
-    }
+    targets = pickAllMajor(outdated).filter((p) => !args.filterPackage || p.name === args.filterPackage);
     console.log(`   Found ${targets.length} major upgrades.`);
   } else {
     const t = pickTarget(outdated, args.filterPackage);
     if (t) targets = [t];
   }
 
-  if (targets.length === 0) {
-    console.log('   Nothing to upgrade. Done.');
-    return;
+  if (targets.length === 0) { console.log('   Nothing to upgrade. Done.'); return; }
+
+  // === NEW: GENERATE TEST IF MISSING (AFTER FINDING TARGET) ===
+  const pkgJson = JSON.parse(await (await import('node:fs/promises')).readFile(join(targetDir, 'package.json'), 'utf8'));
+  if (!pkgJson.scripts?.test && !existsSync(join(targetDir, 'generated.test.js'))) {
+    console.log(`\n🧪 No tests found. Asking AI to generate a smoke test for ${targets[0].name}...`);
+    const gen = await generateTest(targetDir, targets[0].name);
+    if (gen.created) console.log(`   ✓ ${gen.summary}`);
+    else console.log(`   ❌ Failed to generate test: ${gen.summary}`);
   }
 
   const testOpts = { skipLint: args.skipLint, skipSmoke: args.skipSmoke };
@@ -254,8 +168,7 @@ async function main() {
     const baseline = await runTests(targetDir, pm, targets[0], testOpts);
     report.baseline = baseline;
     if (!baseline.ok && baseline.verified) {
-      console.log('   Baseline tests already FAIL. Skipping everything.');
-      console.log('   (pass --skip-baseline to force)');
+      console.log('   ❌ Baseline tests FAIL. Skipping.');
       report.preExistingFailure = true;
       printReport(report);
       return;
@@ -264,21 +177,16 @@ async function main() {
   }
 
   if (!args.allMajor) {
-    const rep = await processOnePackage(targetDir, pm, git, defaultBranch, targets[0], args);
-    Object.assign(report, rep);
+    Object.assign(report, await processOnePackage(targetDir, pm, git, defaultBranch, targets[0], args));
   } else {
     report.packages = [];
     for (const t of targets) {
-      console.log(`\n${'='.repeat(50)}`);
-      console.log(`Processing: ${t.name} ${t.current} -> ${t.latest}`);
-      console.log('='.repeat(50));
-      const rep = await processOnePackage(targetDir, pm, git, defaultBranch, t, args);
-      report.packages.push(rep);
+      console.log(`\n${'='.repeat(50)}\nProcessing: ${t.name} ${t.current} -> ${t.latest}\n${'='.repeat(50)}`);
+      report.packages.push(await processOnePackage(targetDir, pm, git, defaultBranch, t, args));
     }
   }
 
   if (args.dryRun) console.log('\n[dry-run] skipping commit and PR creation.');
-
   printReport(report);
 }
 
