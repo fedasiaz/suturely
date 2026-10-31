@@ -1,10 +1,12 @@
 import dotenv from 'dotenv';
 dotenv.config({ override: true });
 
+import { existsSync } from 'node:fs'; // Добавлен импорт
+import { join } from 'node:path';     // Добавлен импорт
 import { execa } from 'execa';
 import type { SimpleGit } from 'simple-git';
 import { cloneRepo } from './clone.js';
-import { detectPM, type PM } from './detect.js';
+import { detectPM, findMonorepoPackages, type PM } from './detect.js'; // Добавлен findMonorepoPackages
 import { getOutdated, pickTarget, pickAllMajor, type OutdatedPkg } from './outdated.js';
 import { applyUpgrade } from './upgrade.js';
 import { runTests } from './test.js';
@@ -26,7 +28,6 @@ type Args = {
 };
 
 async function getArgs(): Promise<Args> {
-  // If arguments are passed via CLI, parse them (for automation)
   if (process.argv.length > 2) {
     const out: Args = {
       source: '', pushPr: false, dryRun: false,
@@ -49,10 +50,8 @@ async function getArgs(): Promise<Args> {
     return out;
   }
 
-  // If no arguments, use interactive mode
   console.log('\nWelcome to suturely! Let\'s configure your run.\n');
   const interactive = await runInteractive();
-  
   return {
     source: interactive.source,
     filterPackage: interactive.filterPackage,
@@ -117,7 +116,7 @@ async function pushAndCreatePR(
 }
 
 async function processOnePackage(
-  dir: string,
+  targetDir: string, // <-- Изменено на targetDir
   pm: PM,
   git: SimpleGit,
   defaultBranch: string,
@@ -126,11 +125,10 @@ async function processOnePackage(
 ): Promise<any> {
   const rep: any = { target, steps: [] };
 
-  // Reset to clean default branch before each package
   try {
     await git.checkout(defaultBranch);
     await git.reset(['--hard', `origin/${defaultBranch}`]);
-    await execa(pm, ['install', '--no-audit', '--no-fund'], { cwd: dir, reject: false });
+    await execa(pm, ['install', '--no-audit', '--no-fund'], { cwd: targetDir, reject: false });
   } catch (e: any) {
     console.log('   reset to default failed:', e?.message?.slice(0, 120));
   }
@@ -141,11 +139,11 @@ async function processOnePackage(
   await git.checkoutLocalBranch(branch);
 
   console.log(`   Upgrading ${target.name}...`);
-  await applyUpgrade(dir, pm, target);
+  await applyUpgrade(targetDir, pm, target);
 
   console.log(`   Running tests after upgrade...`);
   const testOpts = { skipLint: args.skipLint, skipSmoke: args.skipSmoke };
-  let testResult = await runTests(dir, pm, target, testOpts);
+  let testResult = await runTests(targetDir, pm, target, testOpts);
   rep.steps.push({ phase: 'after-upgrade', ...testResult });
 
   let attempt = 0;
@@ -155,7 +153,7 @@ async function processOnePackage(
     console.log(`   Fix attempt ${attempt}/3...`);
     let fix: { applied: boolean; summary?: string };
     try {
-      fix = await tryFix(dir, target, testResult);
+      fix = await tryFix(targetDir, target, testResult);
     } catch (e: any) {
       fix = { applied: false, summary: 'crash: ' + (e?.message ?? '') };
     }
@@ -164,7 +162,7 @@ async function processOnePackage(
       break;
     }
     console.log('   Applied fix:', fix.summary);
-    testResult = await runTests(dir, pm, target, testOpts);
+    testResult = await runTests(targetDir, pm, target, testOpts);
     rep.steps.push({ phase: `fix-${attempt}`, ...testResult });
     const nowOutput = testResult.stdout + testResult.stderr;
     if (nowOutput === lastOutput && !testResult.ok) {
@@ -178,7 +176,7 @@ async function processOnePackage(
   rep.verified = testResult.verified;
 
   if (!args.dryRun && args.pushPr) {
-    const prUrl = await pushAndCreatePR(dir, git, branch, target, testResult.ok, testResult.verified);
+    const prUrl = await pushAndCreatePR(targetDir, git, branch, target, testResult.ok, testResult.verified);
     if (prUrl) rep.prUrl = prUrl;
   }
 
@@ -186,7 +184,6 @@ async function processOnePackage(
 }
 
 async function main() {
-  // Load config and apply saved API keys if they exist
   const config = await loadConfig();
   if (config.apiKey && !process.env.LLM_API_KEY) process.env.LLM_API_KEY = config.apiKey;
   if (config.baseUrl && !process.env.LLM_BASE_URL) process.env.LLM_BASE_URL = config.baseUrl;
@@ -206,19 +203,32 @@ async function main() {
   report.isLocal = isLocal;
   console.log(`   Default branch: ${defaultBranch}`);
 
-  const pm = await detectPM(dir);
+  // === MONOREPO SUPPORT ===
+  let targetDir = dir;
+  if (!existsSync(join(dir, 'package.json'))) {
+    console.log(`\n   No root package.json found. Searching for monorepo packages...`);
+    const packages = findMonorepoPackages(dir);
+    if (packages.length === 0) {
+      console.error('   ❌ No packages found in this repo. Aborting.');
+      return;
+    }
+    targetDir = packages[0];
+    console.log(`   ✓ Found ${packages.length} packages. Targeting: ${targetDir}`);
+  }
+
+  const pm = await detectPM(targetDir);
   report.pm = pm;
   console.log(`   Package manager: ${pm}`);
 
   console.log(`\nInstalling dependencies...`);
-  const installResult = await execa(pm, ['install', '--no-audit', '--no-fund'], { cwd: dir, reject: false });
+  const installResult = await execa(pm, ['install', '--no-audit', '--no-fund'], { cwd: targetDir, reject: false });
   if (installResult.exitCode !== 0) {
     console.error('   install failed with exit code', installResult.exitCode);
     console.error(installResult.stderr?.slice(0, 1000));
   }
 
   console.log(`\nChecking outdated...`);
-  const outdated = await getOutdated(dir, pm);
+  const outdated = await getOutdated(targetDir, pm);
 
   let targets: OutdatedPkg[] = [];
   if (args.allMajor) {
@@ -241,7 +251,7 @@ async function main() {
 
   if (!args.skipBaseline) {
     console.log(`\nBaseline: running tests BEFORE upgrades...`);
-    const baseline = await runTests(dir, pm, targets[0], testOpts);
+    const baseline = await runTests(targetDir, pm, targets[0], testOpts);
     report.baseline = baseline;
     if (!baseline.ok && baseline.verified) {
       console.log('   Baseline tests already FAIL. Skipping everything.');
@@ -254,7 +264,7 @@ async function main() {
   }
 
   if (!args.allMajor) {
-    const rep = await processOnePackage(dir, pm, git, defaultBranch, targets[0], args);
+    const rep = await processOnePackage(targetDir, pm, git, defaultBranch, targets[0], args);
     Object.assign(report, rep);
   } else {
     report.packages = [];
@@ -262,7 +272,7 @@ async function main() {
       console.log(`\n${'='.repeat(50)}`);
       console.log(`Processing: ${t.name} ${t.current} -> ${t.latest}`);
       console.log('='.repeat(50));
-      const rep = await processOnePackage(dir, pm, git, defaultBranch, t, args);
+      const rep = await processOnePackage(targetDir, pm, git, defaultBranch, t, args);
       report.packages.push(rep);
     }
   }
